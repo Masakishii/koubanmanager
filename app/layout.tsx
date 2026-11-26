@@ -13,9 +13,6 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="ja">
-      <head>
-        <script src="https://cdn.tailwindcss.com" />
-      </head>
       <body className="antialiased bg-slate-100 text-slate-800">{children}</body>
     </html>
   );
