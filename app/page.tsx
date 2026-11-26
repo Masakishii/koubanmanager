@@ -2,6 +2,13 @@
 
 import React, { useState, useEffect, useMemo } from 'react';
 
+interface DispatchMemberEntry {
+  id: string;
+  name: string;
+  start: string;
+  end: string;
+}
+
 interface WorkHistoryEntry {
   id: string;
   date: string;
@@ -18,7 +25,7 @@ interface KoubanSiteItem {
   client_name: string;
   dispatch_start: string;
   dispatch_end: string;
-  dispatch_members: string[];
+  dispatch_members: DispatchMemberEntry[];
   note: string;
   work_history: WorkHistoryEntry[];
   created_at: number;
@@ -37,13 +44,44 @@ interface IntegrationSettings {
 const STORAGE_KEY_SITES = 'genba_kouban_sites_v1';
 const STORAGE_KEY_SETTINGS = 'genba_kouban_settings_v1';
 
-function generateNewSiteKey(): string {
+function getTodayStr(): string {
   const now = new Date();
-  const ymd = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(
-    now.getDate()
-  ).padStart(2, '0')}`;
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+
+function generateNewSiteKey(): string {
+  const ymd = getTodayStr().replace(/-/g, '');
   const rand = Math.random().toString(36).slice(2, 6);
   return `site_${ymd}_${rand}`;
+}
+
+function normalizeMembers(raw: unknown, defaultStart = '', defaultEnd = ''): DispatchMemberEntry[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item, idx) => {
+      if (typeof item === 'string') {
+        return {
+          id: `mem_${idx}_${item}`,
+          name: item.trim(),
+          start: defaultStart,
+          end: defaultEnd,
+        };
+      }
+      if (item && typeof item === 'object') {
+        const obj = item as Record<string, unknown>;
+        return {
+          id: String(obj.id || `mem_${idx}`),
+          name: String(obj.name || '').trim(),
+          start: String(obj.start ?? defaultStart).trim(),
+          end: String(obj.end ?? defaultEnd).trim(),
+        };
+      }
+      return null;
+    })
+    .filter((x): x is DispatchMemberEntry => !!x && x.name.length > 0);
 }
 
 export default function KoubanManagerPage() {
@@ -61,21 +99,29 @@ export default function KoubanManagerPage() {
   // フィルタ・検索・タブ
   const [activeTab, setActiveTab] = useState<'all' | 'unorganized' | 'active'>('all');
   const [searchQuery, setSearchQuery] = useState('');
+  const [todayDate, setTodayDate] = useState('');
   const [syncing, setSyncing] = useState(false);
   const [banner, setBanner] = useState<{ type: 'ok' | 'warn'; text: string } | null>(null);
 
-  // モーダル管理
+  // モーダル・編集フォーム管理（Next.js 16 事前レンダリング対応のため初期値は空文字にし useEffect で設定）
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [editingSite, setEditingSite] = useState<KoubanSiteItem | null>(null);
-  const [newMemberText, setNewMemberText] = useState('');
-  const [newHistoryDate, setNewHistoryDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [newMemberName, setNewMemberName] = useState('');
+  const [newMemberStart, setNewMemberStart] = useState('');
+  const [newMemberEnd, setNewMemberEnd] = useState('');
+  const [newHistoryDate, setNewHistoryDate] = useState('');
   const [newHistoryTitle, setNewHistoryTitle] = useState('');
   const [newHistoryMembers, setNewHistoryMembers] = useState('');
   const [newHistoryNote, setNewHistoryNote] = useState('');
   const [confirmDeleteKey, setConfirmDeleteKey] = useState<string | null>(null);
 
-  // 初回ロード（端末保存データ ＆ 他アプリ保存済み現場キーの自動検出）
+  // 初回ロード
   useEffect(() => {
+    const today = getTodayStr();
+    setTodayDate(today);
+    setNewMemberStart(today);
+    setNewHistoryDate(today);
+
     try {
       const savedCfg = localStorage.getItem(STORAGE_KEY_SETTINGS);
       let loadedSettings: IntegrationSettings = {
@@ -90,7 +136,6 @@ export default function KoubanManagerPage() {
         loadedSettings = { ...loadedSettings, ...JSON.parse(savedCfg) };
       }
 
-      // 他アプリで保存済みのサーバーURLがあれば補助検出
       if (!loadedSettings.syncUrl) {
         for (const k of [
           'mamezu_studio_cloud_cfg_v1',
@@ -112,8 +157,27 @@ export default function KoubanManagerPage() {
       setDraftSettings(loadedSettings);
 
       const savedSitesRaw = localStorage.getItem(STORAGE_KEY_SITES);
-      const initialList: KoubanSiteItem[] = savedSitesRaw ? JSON.parse(savedSitesRaw) : [];
-      setSites(Array.isArray(initialList) ? initialList : []);
+      const parsedList = savedSitesRaw ? JSON.parse(savedSitesRaw) : [];
+      if (Array.isArray(parsedList)) {
+        const normalized: KoubanSiteItem[] = parsedList.map((s: Record<string, unknown>) => ({
+          site_key: String(s.site_key || ''),
+          site_name: String(s.site_name || ''),
+          kouban_no: String(s.kouban_no || ''),
+          prime_contractor: String(s.prime_contractor || ''),
+          client_name: String(s.client_name || ''),
+          dispatch_start: String(s.dispatch_start || ''),
+          dispatch_end: String(s.dispatch_end || ''),
+          dispatch_members: normalizeMembers(
+            s.dispatch_members,
+            String(s.dispatch_start || ''),
+            String(s.dispatch_end || '')
+          ),
+          note: String(s.note || ''),
+          work_history: Array.isArray(s.work_history) ? (s.work_history as WorkHistoryEntry[]) : [],
+          created_at: Number(s.created_at || 0),
+        }));
+        setSites(normalized);
+      }
     } catch {
       // ignore
     }
@@ -138,7 +202,6 @@ export default function KoubanManagerPage() {
     }
   };
 
-  // 共通同期サーバー（genba-sync）から現場一覧を取得して統合
   const handlePullFromCloud = async (targetUrl?: string) => {
     const base = (targetUrl ?? settings.syncUrl).trim().replace(/\/+$/, '');
     if (!base) {
@@ -171,8 +234,10 @@ export default function KoubanManagerPage() {
           row.prime_contractor ?? row.contractor ?? existing?.prime_contractor ?? ''
         ).trim();
         const client = String(row.client_name ?? existing?.client_name ?? '').trim();
+        const dStart = String(row.dispatch_start ?? existing?.dispatch_start ?? '').trim();
+        const dEnd = String(row.dispatch_end ?? existing?.dispatch_end ?? '').trim();
         const members = Array.isArray(row.dispatch_members)
-          ? (row.dispatch_members as string[])
+          ? normalizeMembers(row.dispatch_members, dStart, dEnd)
           : existing?.dispatch_members || [];
         const history = Array.isArray(row.work_history)
           ? (row.work_history as WorkHistoryEntry[])
@@ -186,8 +251,8 @@ export default function KoubanManagerPage() {
           kouban_no: koubanNo,
           prime_contractor: prime,
           client_name: client,
-          dispatch_start: String(row.dispatch_start ?? existing?.dispatch_start ?? '').trim(),
-          dispatch_end: String(row.dispatch_end ?? existing?.dispatch_end ?? '').trim(),
+          dispatch_start: dStart,
+          dispatch_end: dEnd,
           dispatch_members: members,
           note: String(row.note ?? existing?.note ?? '').trim(),
           work_history: history,
@@ -214,7 +279,6 @@ export default function KoubanManagerPage() {
     }
   };
 
-  // 編集した現場・工番情報を端末＆クラウドへ保存
   const handleSaveEditingSite = async () => {
     if (!editingSite) return;
     const cleanKey = editingSite.site_key.trim() || generateNewSiteKey();
@@ -296,14 +360,14 @@ export default function KoubanManagerPage() {
     setBanner({ type: 'ok', text: `🗑️ 現場（${siteKey}）を削除しました` });
   };
 
-  // JSONバックアップ出力・復元
   const handleExportJson = () => {
-    const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), sites }, null, 2)], {
-      type: 'application/json',
-    });
+    const blob = new Blob(
+      [JSON.stringify({ exportedAt: new Date().toISOString(), sites }, null, 2)],
+      { type: 'application/json' }
+    );
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `kouban_sites_${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `kouban_sites_${getTodayStr()}.json`;
     a.click();
   };
 
@@ -314,10 +378,31 @@ export default function KoubanManagerPage() {
     reader.onload = () => {
       try {
         const parsed = JSON.parse(String(reader.result || '{}'));
-        const list = Array.isArray(parsed?.sites) ? parsed.sites : Array.isArray(parsed) ? parsed : [];
+        const list = Array.isArray(parsed?.sites)
+          ? parsed.sites
+          : Array.isArray(parsed)
+          ? parsed
+          : [];
         if (list.length === 0) throw new Error('有効なデータが見つかりません');
-        persistSites(list);
-        setBanner({ type: 'ok', text: `📂 ${list.length} 件の工番・現場データを読み込みました` });
+        const normalized: KoubanSiteItem[] = list.map((s: Record<string, unknown>) => ({
+          site_key: String(s.site_key || ''),
+          site_name: String(s.site_name || ''),
+          kouban_no: String(s.kouban_no || ''),
+          prime_contractor: String(s.prime_contractor || ''),
+          client_name: String(s.client_name || ''),
+          dispatch_start: String(s.dispatch_start || ''),
+          dispatch_end: String(s.dispatch_end || ''),
+          dispatch_members: normalizeMembers(
+            s.dispatch_members,
+            String(s.dispatch_start || ''),
+            String(s.dispatch_end || '')
+          ),
+          note: String(s.note || ''),
+          work_history: Array.isArray(s.work_history) ? (s.work_history as WorkHistoryEntry[]) : [],
+          created_at: Number(s.created_at || Date.now()),
+        }));
+        persistSites(normalized);
+        setBanner({ type: 'ok', text: `📂 ${normalized.length} 件の工番・現場データを読み込みました` });
       } catch (err: unknown) {
         setBanner({
           type: 'warn',
@@ -329,7 +414,6 @@ export default function KoubanManagerPage() {
     e.target.value = '';
   };
 
-  // 他アプリを開くヘルパー
   const openRelatedApp = (baseUrl: string, site: KoubanSiteItem, appLabel: string) => {
     const clean = baseUrl.trim().replace(/\/+$/, '');
     if (!clean) {
@@ -349,16 +433,14 @@ export default function KoubanManagerPage() {
     );
   };
 
-  // 絞り込み済み一覧
   const filteredSites = useMemo(() => {
-    const todayStr = new Date().toISOString().slice(0, 10);
     const q = searchQuery.trim().toLowerCase();
 
     return sites.filter((s) => {
       const unorg = !s.kouban_no.trim() && !s.prime_contractor.trim() && !s.client_name.trim();
       if (activeTab === 'unorganized' && !unorg) return false;
-      if (activeTab === 'active') {
-        if (s.dispatch_end && s.dispatch_end < todayStr) return false;
+      if (activeTab === 'active' && todayDate) {
+        if (s.dispatch_end && s.dispatch_end < todayDate) return false;
       }
       if (!q) return true;
       return (
@@ -367,10 +449,10 @@ export default function KoubanManagerPage() {
         s.prime_contractor.toLowerCase().includes(q) ||
         s.client_name.toLowerCase().includes(q) ||
         s.site_key.toLowerCase().includes(q) ||
-        s.dispatch_members.some((m) => m.toLowerCase().includes(q))
+        s.dispatch_members.some((m) => m.name.toLowerCase().includes(q))
       );
     });
-  }, [sites, activeTab, searchQuery]);
+  }, [sites, activeTab, searchQuery, todayDate]);
 
   const unorganizedCount = useMemo(
     () =>
@@ -393,28 +475,33 @@ export default function KoubanManagerPage() {
               </span>
             </h1>
             <p className="text-[11px] text-slate-400">
-              工番・元請け・顧客・出向者・履歴の一元整理 ＆ 各現場アプリ連携
+              工番・元請け・顧客・出向者（期間別）・履歴の一元整理 ＆ 各現場アプリ連携
             </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-1.5 text-xs">
             <button
               type="button"
-              onClick={() =>
+              onClick={() => {
+                const today = getTodayStr();
+                setNewMemberName('');
+                setNewMemberStart(today);
+                setNewMemberEnd('');
+                setNewHistoryDate(today);
                 setEditingSite({
                   site_key: generateNewSiteKey(),
                   site_name: '',
                   kouban_no: '',
                   prime_contractor: '',
                   client_name: '',
-                  dispatch_start: new Date().toISOString().slice(0, 10),
+                  dispatch_start: today,
                   dispatch_end: '',
                   dispatch_members: [],
                   note: '',
                   work_history: [],
                   created_at: Date.now(),
-                })
-              }
+                });
+              }}
               className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold shadow-sm cursor-pointer"
             >
               ＋ 新規工番・現場登録
@@ -444,7 +531,6 @@ export default function KoubanManagerPage() {
       </header>
 
       <main className="max-w-5xl mx-auto px-4 pt-5 space-y-4">
-        {/* 通知バナー */}
         {banner && (
           <div
             className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center justify-between gap-2 shadow-xs ${
@@ -580,7 +666,17 @@ export default function KoubanManagerPage() {
                       <div className="flex items-center gap-1 shrink-0">
                         <button
                           type="button"
-                          onClick={() => setEditingSite({ ...site })}
+                          onClick={() => {
+                            setNewMemberName('');
+                            setNewMemberStart(site.dispatch_start || getTodayStr());
+                            setNewMemberEnd(site.dispatch_end || '');
+                            setNewHistoryDate(getTodayStr());
+                            setEditingSite({
+                              ...site,
+                              dispatch_members: [...site.dispatch_members],
+                              work_history: [...site.work_history],
+                            });
+                          }}
                           className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold cursor-pointer"
                         >
                           ✏️ 情報を整理
@@ -606,7 +702,7 @@ export default function KoubanManagerPage() {
                       </div>
                     </div>
 
-                    {/* 元請け・顧客・期間 */}
+                    {/* 元請け・顧客・全体工期 */}
                     <div className="grid grid-cols-2 gap-2 text-xs bg-slate-50 p-2.5 rounded-xl border border-slate-100">
                       <div>
                         <span className="text-[10px] text-slate-400 block">元請け会社</span>
@@ -622,7 +718,7 @@ export default function KoubanManagerPage() {
                       </div>
                       <div className="col-span-2 pt-1 border-t border-slate-200/70 flex items-center justify-between">
                         <span className="text-[10px] text-slate-500">
-                          📅 出向・工期:{' '}
+                          📅 全体工期:{' '}
                           <strong className="text-slate-700">
                             {site.dispatch_start || '未定'} ～ {site.dispatch_end || '未定'}
                           </strong>
@@ -633,18 +729,27 @@ export default function KoubanManagerPage() {
                       </div>
                     </div>
 
-                    {/* 出向者バッジ */}
+                    {/* 出向者（個別期間つき）一覧 */}
                     {site.dispatch_members.length > 0 && (
-                      <div className="flex flex-wrap items-center gap-1">
-                        <span className="text-[10px] font-bold text-slate-400 mr-1">👷 出向者:</span>
-                        {site.dispatch_members.map((m, i) => (
-                          <span
-                            key={i}
-                            className="px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 text-[11px] font-bold"
-                          >
-                            {m}
-                          </span>
-                        ))}
+                      <div className="space-y-1">
+                        <span className="text-[10px] font-bold text-slate-400 block">
+                          👷 出向者・担当期間:
+                        </span>
+                        <div className="flex flex-wrap gap-1.5">
+                          {site.dispatch_members.map((m) => (
+                            <span
+                              key={m.id}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-emerald-50 text-emerald-900 border border-emerald-200 text-[11px] font-bold"
+                            >
+                              <span>{m.name}</span>
+                              {(m.start || m.end) && (
+                                <span className="text-[10px] font-normal text-emerald-700">
+                                  ({m.start || '未定'}〜{m.end || '未定'})
+                                </span>
+                              )}
+                            </span>
+                          ))}
+                        </div>
                       </div>
                     )}
 
@@ -784,7 +889,7 @@ export default function KoubanManagerPage() {
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">出向・工期（開始日）</label>
+                  <label className="block font-bold text-slate-700 mb-1">全体工期（開始日）</label>
                   <input
                     type="date"
                     value={editingSite.dispatch_start}
@@ -795,7 +900,7 @@ export default function KoubanManagerPage() {
                   />
                 </div>
                 <div>
-                  <label className="block font-bold text-slate-700 mb-1">出向・工期（終了予定日）</label>
+                  <label className="block font-bold text-slate-700 mb-1">全体工期（終了予定日）</label>
                   <input
                     type="date"
                     value={editingSite.dispatch_end}
@@ -807,50 +912,123 @@ export default function KoubanManagerPage() {
                 </div>
               </div>
 
-              {/* 出向メンバー管理 */}
-              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
-                <label className="block font-bold text-slate-700">👷 出向者・担当メンバー</label>
-                <div className="flex flex-wrap gap-1.5">
-                  {editingSite.dispatch_members.map((m, i) => (
-                    <span
-                      key={i}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-900 font-bold"
-                    >
-                      <span>{m}</span>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          setEditingSite({
-                            ...editingSite,
-                            dispatch_members: editingSite.dispatch_members.filter((_, idx) => idx !== i),
-                          })
-                        }
-                        className="text-emerald-700 hover:text-rose-600 ml-0.5"
-                      >
-                        ×
-                      </button>
-                    </span>
-                  ))}
+              {/* 出向メンバー管理（担当者ごとの個別期間対応） */}
+              <div className="p-3.5 rounded-xl bg-emerald-50/50 border border-emerald-200 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <label className="font-bold text-slate-800">
+                    👷 出向者・担当メンバー（担当者ごとの個別期間を設定可能）
+                  </label>
                 </div>
-                <div className="flex gap-2">
+
+                {editingSite.dispatch_members.length > 0 && (
+                  <div className="space-y-1.5">
+                    {editingSite.dispatch_members.map((m) => (
+                      <div
+                        key={m.id}
+                        className="flex flex-wrap items-center gap-2 bg-white p-2 rounded-xl border border-emerald-200"
+                      >
+                        <input
+                          type="text"
+                          value={m.name}
+                          onChange={(e) =>
+                            setEditingSite({
+                              ...editingSite,
+                              dispatch_members: editingSite.dispatch_members.map((item) =>
+                                item.id === m.id ? { ...item, name: e.target.value } : item
+                              ),
+                            })
+                          }
+                          className="w-28 sm:w-32 border border-slate-200 rounded-lg px-2 py-1 font-bold text-slate-900"
+                        />
+                        <div className="flex items-center gap-1 text-[11px] text-slate-600">
+                          <span>開始:</span>
+                          <input
+                            type="date"
+                            value={m.start}
+                            onChange={(e) =>
+                              setEditingSite({
+                                ...editingSite,
+                                dispatch_members: editingSite.dispatch_members.map((item) =>
+                                  item.id === m.id ? { ...item, start: e.target.value } : item
+                                ),
+                              })
+                            }
+                            className="border border-slate-200 rounded-lg px-1.5 py-1"
+                          />
+                          <span>～ 終了:</span>
+                          <input
+                            type="date"
+                            value={m.end}
+                            onChange={(e) =>
+                              setEditingSite({
+                                ...editingSite,
+                                dispatch_members: editingSite.dispatch_members.map((item) =>
+                                  item.id === m.id ? { ...item, end: e.target.value } : item
+                                ),
+                              })
+                            }
+                            className="border border-slate-200 rounded-lg px-1.5 py-1"
+                          />
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setEditingSite({
+                              ...editingSite,
+                              dispatch_members: editingSite.dispatch_members.filter(
+                                (item) => item.id !== m.id
+                              ),
+                            })
+                          }
+                          className="ml-auto text-slate-400 hover:text-rose-600 px-1.5 font-bold"
+                          title="出向者を削除"
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 pt-1">
                   <input
                     type="text"
-                    value={newMemberText}
-                    onChange={(e) => setNewMemberText(e.target.value)}
-                    placeholder="担当者名を入力..."
-                    className="flex-1 border border-slate-300 rounded-lg px-2.5 py-1.5 bg-white"
+                    value={newMemberName}
+                    onChange={(e) => setNewMemberName(e.target.value)}
+                    placeholder="担当者名..."
+                    className="sm:col-span-4 border border-slate-300 rounded-lg px-2.5 py-1.5 bg-white"
+                  />
+                  <input
+                    type="date"
+                    value={newMemberStart}
+                    onChange={(e) => setNewMemberStart(e.target.value)}
+                    title="出向開始日"
+                    className="sm:col-span-3 border border-slate-300 rounded-lg px-2 py-1.5 bg-white"
+                  />
+                  <input
+                    type="date"
+                    value={newMemberEnd}
+                    onChange={(e) => setNewMemberEnd(e.target.value)}
+                    title="出向終了日"
+                    className="sm:col-span-3 border border-slate-300 rounded-lg px-2 py-1.5 bg-white"
                   />
                   <button
                     type="button"
                     onClick={() => {
-                      if (!newMemberText.trim()) return;
+                      if (!newMemberName.trim()) return;
+                      const entry: DispatchMemberEntry = {
+                        id: `mem_${Date.now()}`,
+                        name: newMemberName.trim(),
+                        start: newMemberStart,
+                        end: newMemberEnd,
+                      };
                       setEditingSite({
                         ...editingSite,
-                        dispatch_members: [...editingSite.dispatch_members, newMemberText.trim()],
+                        dispatch_members: [...editingSite.dispatch_members, entry],
                       });
-                      setNewMemberText('');
+                      setNewMemberName('');
                     }}
-                    className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white font-bold"
+                    className="sm:col-span-2 px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold shrink-0"
                   >
                     ＋ 追加
                   </button>
@@ -869,7 +1047,7 @@ export default function KoubanManagerPage() {
               </div>
 
               {/* 業務・作業履歴ログ */}
-              <div className="p-3 rounded-xl bg-blue-50/50 border border-blue-200 space-y-2.5">
+              <div className="p-3.5 rounded-xl bg-blue-50/50 border border-blue-200 space-y-2.5">
                 <div className="font-bold text-slate-800">📋 業務・施工履歴ログ</div>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                   <input
@@ -885,13 +1063,35 @@ export default function KoubanManagerPage() {
                     placeholder="作業内容（例: 足場組立・搬入）"
                     className="border border-slate-300 rounded-lg px-2 py-1.5 bg-white"
                   />
-                  <input
-                    type="text"
-                    value={newHistoryMembers}
-                    onChange={(e) => setNewHistoryMembers(e.target.value)}
-                    placeholder="参加メンバー"
-                    className="border border-slate-300 rounded-lg px-2 py-1.5 bg-white"
-                  />
+                  <div className="flex gap-1">
+                    <input
+                      type="text"
+                      value={newHistoryMembers}
+                      onChange={(e) => setNewHistoryMembers(e.target.value)}
+                      placeholder="参加メンバー"
+                      className="flex-1 min-w-0 border border-slate-300 rounded-lg px-2 py-1.5 bg-white"
+                    />
+                    {editingSite.dispatch_members.length > 0 && (
+                      <select
+                        value=""
+                        onChange={(e) => {
+                          if (!e.target.value) return;
+                          setNewHistoryMembers((prev) =>
+                            prev ? `${prev}, ${e.target.value}` : e.target.value
+                          );
+                        }}
+                        title="登録済み出向者から選択"
+                        className="border border-slate-300 rounded-lg px-1.5 py-1.5 bg-white text-[11px] font-bold text-slate-700"
+                      >
+                        <option value="">＋選択</option>
+                        {editingSite.dispatch_members.map((m) => (
+                          <option key={m.id} value={m.name}>
+                            {m.name}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
                 </div>
                 <div className="flex gap-2">
                   <input
